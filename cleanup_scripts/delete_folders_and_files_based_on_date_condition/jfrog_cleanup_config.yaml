@@ -1,0 +1,16 @@
+# Protected paths (do not delete or cold-store these)
+protected_paths:
+  - "build_tools/"
+  - "builds_ns/builds_xs/"
+  - "builds_ns/ns1/"
+
+# Time threshold in days (default: 730 days = 2 years)
+time_threshold_days: 300
+
+# List of custom cleanup target paths (add your paths here)
+cleanup_target_paths:
+  - "builds_ns/builds_zion/gcov/"
+  - "builds_ns/ns1/"
+  - "builds_ns/builds_artesa/build_artesa_54_2913"
+
+log_level: INFO
