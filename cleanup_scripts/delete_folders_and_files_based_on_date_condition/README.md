@@ -10,7 +10,6 @@ This script helps you identify and delete old build folders/files from a JFrog A
 - Generates a JFrog CLI file spec for deletion
 - Supports dry-run mode (default: enabled)
 - Optionally executes deletion using the JFrog CLI
-- Includes repo names in file spec patterns
 - Allows selection of date fields (`created`, `modified`, `updated`) for threshold comparison
 
 ## Requirements
@@ -69,7 +68,7 @@ protected_paths:
   - builds_ns/ns1/
 time_threshold_days: 300
 cleanup_target_paths:
-  - my-repo/path/to/cleanup/
+  - builds_ns/builds_zion/gcov/
 ```
 
 ## Output
