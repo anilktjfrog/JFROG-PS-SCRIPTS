@@ -338,7 +338,7 @@ def get_build_folder(path):
     Returns:
         str: The build folder path, or the original path if not matched.
     """
-    match = re.search(r"(.*?/)?(build_[^/]+_\d+_\d+)(/.*)?$", path)
+    match = re.search(r"(.*?/)?(build_.*$)", path)
     if match:
         return path[: path.find(match.group(2)) + len(match.group(2))]
     else:
