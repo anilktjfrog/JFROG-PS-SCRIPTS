@@ -1,3 +1,7 @@
+build_folder_patterns:
+  - "^builds_ns(/.*)?/build_[a-z0-9_]+_a$"
+  - "^builds_ns(/.*)?/build_.*_[0-9]{4}$"
+  - "^builds_ns(/.*)?/build.*_[a-z0-9]{11}$"
 # Protected paths (do not delete or cold-store these)
 protected_paths:
   - "build_tools/"
@@ -10,7 +14,5 @@ time_threshold_days: 300
 # List of custom cleanup target paths (add your paths here)
 cleanup_target_paths:
   - "builds_ns/builds_zion/gcov/"
-  - "builds_ns/ns1/"
-  - "builds_ns/builds_artesa/build_artesa_54_2913"
 
 log_level: INFO

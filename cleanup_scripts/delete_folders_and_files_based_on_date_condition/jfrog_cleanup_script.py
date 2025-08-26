@@ -57,20 +57,18 @@ def is_protected(folder, protected_paths):
     return any(folder.startswith(path) for path in protected_paths)
 
 
-def match_build_folder(folder):
+def match_build_folder_with_patterns(folder, patterns):
     """
-    Determine if a folder matches known build folder patterns.
+    Determine if a folder matches any of the provided regex patterns.
     Args:
         folder (str): Folder path to check.
+        patterns (list): List of regex patterns as strings.
     Returns:
-        bool: True if folder matches a build pattern, False otherwise.
+        bool: True if folder matches any pattern, False otherwise.
     """
-    if re.search(r"_a$", folder):
-        return True
-    if re.search(r"_[1-9]{4}$", folder):
-        return True
-    if re.search(r"_[a-z1-9]{11}$", folder):
-        return True
+    for pat in patterns:
+        if re.search(pat, folder):
+            return True
     return False
 
 
@@ -374,10 +372,11 @@ def main():
     logger.info(f"Deleting folders which match the build folder pattern...")
     logger.info(f"Total build folders found: {len(folders)}")
     logger.info(f"Processing build folders for deletion criteria...")
+    build_folder_patterns = config.get("build_folder_patterns", [])
     for folder, files in folders.items():
         if is_protected(folder + "/", protected_paths):
             continue
-        if not match_build_folder(folder):
+        if not match_build_folder_with_patterns(folder, build_folder_patterns):
             continue
         # Get the repo name from the first file in the folder
         repo_name = files[0].get("repo", "")
