@@ -12,6 +12,11 @@ This script helps you identify and delete old build folders/files from a JFrog A
 - Optionally executes deletion using the JFrog CLI
 - Allows selection of date fields (`created`, `modified`, `updated`) for threshold comparison
 
+## New Features
+
+- **Chunk Size Parameter**: Added a `chunk_size` parameter in the YAML configuration to split deletion tasks into smaller chunks.
+- **Folder-Based Spec Files**: Spec files are now written to a timestamped folder for better organization.
+
 ## Requirements
 
 - Python 3.8+
@@ -35,28 +40,22 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The `requirements.txt` file should contain:
-
-```
-pyyaml
-tabulate
-```
-
 ## Usage
 
 ```sh
-python3 jfrog_cleanup_script.py [--config <config.yaml>] [--json <repo_files.json>] [--dry-run] [--date-field <created|modified|updated>]
+python3 jfrog_cleanup_script.py [--config <config.yaml>] [--json <repo_files.json>] [--dry-run] [--date-field <created|modified|updated>] [--repo_name <repo_name>]
 ```
 
 - `--config`: Path to the YAML config file (default: `jfrog_cleanup_config.yaml`)
-- `--json`: Path to the Artifactory repo files JSON (default: `repo_files.json`)
-- `--dry-run`: Perform a dry run (no data will be deleted). This is enabled by default.
+- `--dry-run`: Perform a dry run (no data will be deleted). This is enabled by default. Use `--dry-run=false` to disable.
 - `--date-field`: Specify which date field to use for threshold comparison (default: `created`)
+- `--repo_name`: Specify the name of the repository to fetch all files from (uses JFrog CLI).
+- `--json`: Path to the Artifactory repo files JSON (default: `repo_files.json`)
 
 ## Example
 
 ```sh
-python3 jfrog_cleanup_script.py --config jfrog_cleanup_config.yaml --json repo_files.json --date-field modified
+python3 jfrog_cleanup_script.py --config jfrog_cleanup_config.yaml --repo_name <local_repo_name> --date-field created
 ```
 
 ## Configuration File Example (`jfrog_cleanup_config.yaml`)
@@ -69,13 +68,14 @@ protected_paths:
 time_threshold_days: 300
 cleanup_target_paths:
   - builds_ns/builds_zion/gcov/
+chunk_size: 100
 ```
 
 ## Output
 
 - Tabular summary of folders/files eligible for deletion
-- File spec JSON (`folders_to_delete_spec.json`) for JFrog CLI
-- (Optional) JFrog CLI deletion execution
+- File spec JSON files are now written to a timestamped folder (e.g., `spec_files_20250826_123456/`) for better organization.
+- (Optional) JFrog CLI deletion execution for each spec file.
 
 ## Deleting Folders
 
