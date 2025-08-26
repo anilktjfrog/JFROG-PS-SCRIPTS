@@ -12,6 +12,12 @@ import argparse
 import logging
 import pathlib
 from datetime import datetime
+import tempfile
+import requests
+import json
+import time
+import shutil
+
 
 # Define constants
 DEFAULT_REPO_FILE = "repo_files.json"
@@ -70,6 +76,111 @@ def match_build_folder_with_patterns(folder, patterns):
         if re.search(pat, folder):
             return True
     return False
+
+
+def run_aql_pagination(
+    input_aql,
+    limit,
+    artifactory_url,
+    auth=None,
+    logger=None,
+    output_file="aqloutput.json",
+):
+    """
+    Run AQL with pagination, mimicking the bash logic provided. Aggregates all results into a single output file.
+    input_aql: path to file containing the AQL query (without .include or .offset/.limit)
+    limit: int, number of results per page
+    artifactory_url: base URL of Artifactory
+    auth: (username, password) tuple or None
+    api_key: str or None
+    logger: logger instance
+    output_file: output file to write aggregated results
+    """
+
+    session = requests.Session()
+    headers = {"Content-Type": "text/plain"}
+    start_pos = 0
+    total_results = 0
+    query_count = 0
+    temp_dir = tempfile.mkdtemp()
+    if logger:
+        logger.info(f"Using temporary directory: {temp_dir}")
+    result_files = []
+    while True:
+        query_count += 1
+        temp_aql = os.path.join(temp_dir, f"query_{query_count}.aql")
+        # Read base AQL and append offset/limit
+        with open(input_aql, "r") as f:
+            base_aql = f.read()
+        if ".include(" in base_aql:
+            raise ValueError(
+                "Remove [.include] in the AQL file. .offset will not work with .include."
+            )
+        with open(temp_aql, "w") as f:
+            f.write(base_aql.strip() + f".offset({start_pos}).limit({limit})\n")
+        if logger:
+            logger.info(f"Query #{query_count}: start_pos={start_pos}, limit={limit}")
+            logger.info(f"AQL: {open(temp_aql).read()}")
+        # Run the AQL query
+        with open(temp_aql, "r") as f:
+            aql_query = f.read()
+        try:
+            response = session.post(
+                f"{artifactory_url}/api/search/aql",
+                data=aql_query,
+                headers=headers,
+                auth=auth,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            if logger:
+                logger.error(f"AQL query failed: {e}")
+            break
+        results = data.get("results", [])
+        range_info = data.get("range", {})
+        if not results:
+            if logger:
+                logger.info("No results returned, stopping.")
+            break
+        # Save results to temp file
+        result_file = os.path.join(temp_dir, f"results_{query_count}.json")
+        with open(result_file, "w") as f:
+            json.dump(results, f)
+        result_files.append(result_file)
+        batch_count = len(results)
+        total_results += batch_count
+        current_start = range_info.get("start_pos", 0)
+        current_end = range_info.get("end_pos", 0)
+        current_total = range_info.get("total", 0)
+        current_limit = range_info.get("limit", 0)
+        if logger:
+            logger.info(f"Results: {current_start} to {current_end} of {current_total}")
+            logger.info(f"Batch size: {batch_count} items")
+        # Check if we've reached the end
+        if (current_end + 1) >= current_total:
+            if logger:
+                logger.info("Reached end of results.")
+            break
+        # Update start position for next iteration
+        start_pos = current_end + 1
+        time.sleep(1)
+    # Combine all results into final output file
+    with open(output_file, "w") as out:
+        all_items = []
+        for rf in result_files:
+            with open(rf, "r") as f:
+                items = json.load(f)
+                all_items.extend(items)
+        json.dump({"results": all_items}, out, indent=2)
+    if logger:
+        logger.info(f"Results saved to {output_file}")
+        logger.info(f"File size: {os.path.getsize(output_file)/1024/1024:.2f} MB")
+        logger.info("=" * 80)
+
+    # Clean up temp files
+    shutil.rmtree(temp_dir)
+    return output_file
 
 
 def print_file_table(logger, title, files):
@@ -231,7 +342,7 @@ def get_build_folder(path):
     if match:
         return path[: path.find(match.group(2)) + len(match.group(2))]
     else:
-        return path
+        return None
 
 
 def print_table(logger, title, rows):
@@ -291,8 +402,14 @@ def main():
     parser.add_argument(
         "--json",
         dest="repo_file",
-        default=DEFAULT_REPO_FILE,
-        help="Path to repo_files.json",
+        default=None,
+        help="Path to repo_files.json (if provided, --repo_name is ignored)",
+    )
+    parser.add_argument(
+        "--repo_name",
+        dest="repo_name",
+        default=None,
+        help="Name of the repository to fetch all files from (uses JFrog CLI)",
     )
     parser.add_argument(
         "--config",
@@ -303,7 +420,7 @@ def main():
     parser.add_argument(
         "--dry-run",
         dest="dry_run",
-        action="store_true",
+        type=lambda x: x.lower() == "true",
         default=True,
         help="Perform a dry run of the delete operation (no data will be deleted). Default: True",
     )
@@ -339,7 +456,47 @@ def main():
         f"Current date (UTC): {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S %Z')}"
     )
 
-    repo_files = load_repo_files(args.repo_file)
+    # If --json is provided, use it. If not, and --repo_name is provided, fetch files from repo using AQL pagination logic
+    repo_file_path = args.repo_file
+    if not repo_file_path and args.repo_name:
+        artifactory_url = config.get("artifactory_url")
+        username = config.get("username")
+        password = config.get("password")
+        access_token = config.get("access_token")
+        limit = config.get("aql_limit", 10000)
+        # Write aql query to a temp file (without .include/.offset/.limit)
+        base_aql = f'items.find({{"repo": "{args.repo_name}"}})'
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".aql") as tf:
+            tf.write(base_aql)
+            aql_file = tf.name
+        if not artifactory_url or (not (username and password) and not access_token):
+            logger.error(
+                "Artifactory URL and credentials (username/password or access_token) must be set in config YAML."
+            )
+            exit(1)
+        if access_token:
+            auth = ("", access_token)
+        else:
+            auth = (username, password)
+        repo_file_path = f"repo_files_{args.repo_name}.json"
+        logger.info("=" * 80)
+        logger.info(
+            f"Fetching all files from repo '{args.repo_name}' using run_aql_pagination..."
+        )
+        run_aql_pagination(
+            input_aql=aql_file,
+            limit=limit,
+            artifactory_url=artifactory_url,
+            auth=auth,
+            logger=logger,
+            output_file=repo_file_path,
+        )
+        os.unlink(aql_file)
+    elif not repo_file_path:
+        # Default fallback
+        repo_file_path = DEFAULT_REPO_FILE
+
+    repo_files = load_repo_files(repo_file_path)
     date_field = args.date_field
 
     # Process custom cleanup target paths if present
@@ -363,6 +520,8 @@ def main():
         if entry.get("type") != "file":
             continue
         build_folder = get_build_folder(entry["path"])
+        if not build_folder:
+            continue
         entry["full_file_name"] = os.path.join(entry["path"], entry["name"])
         folders[build_folder].append(entry)
 
@@ -370,6 +529,7 @@ def main():
     not_selected = []
     logger.info("-" * 120)
     logger.info(f"Deleting folders which match the build folder pattern...")
+    logger.info("-" * 120)
     logger.info(f"Total build folders found: {len(folders)}")
     logger.info(f"Processing build folders for deletion criteria...")
     build_folder_patterns = config.get("build_folder_patterns", [])
@@ -437,15 +597,31 @@ def main():
         logger.info(f"  Total files to be deleted: {total_files}")
         logger.info(f"  Total space to be freed: {total_size} MB")
 
-        # Write file spec for folders to be deleted
-        file_spec = write_file_spec(logger, to_delete)
-        # If not dry-run
-        if not args.dry_run and file_spec:
-            delete_folders_with_spec(
-                logger,
-                file_spec,
-                dry_run=False,
+        # Split to_delete into smaller chunks and write each chunk to a separate spec file
+        now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        spec_files_dir = pathlib.Path(f"spec_files_{now_str}")
+        spec_files_dir.mkdir(parents=True, exist_ok=True)
+        chunk_size = config.get("delete_chunk_size", 100)
+        spec_files = []
+        for i in range(0, len(to_delete), chunk_size):
+            chunk = to_delete[i : i + chunk_size]
+            spec_filename = (
+                spec_files_dir / f"folders_to_delete_spec_{i // chunk_size + 1}.json"
             )
+            file_spec = write_file_spec(
+                logger, chunk, file_spec_filename=str(spec_filename)
+            )
+            if file_spec:
+                spec_files.append(file_spec)
+
+        # If not dry-run, execute deletion for each spec file
+        if not args.dry_run:
+            for spec_file in spec_files:
+                delete_folders_with_spec(
+                    logger,
+                    spec_file,
+                    dry_run=False,
+                )
 
 
 if __name__ == "__main__":
