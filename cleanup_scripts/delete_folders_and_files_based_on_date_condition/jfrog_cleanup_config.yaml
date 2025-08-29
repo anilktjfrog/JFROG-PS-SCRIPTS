@@ -19,10 +19,6 @@ log_level: INFO
 
 # Artifactory connection and AQL pagination parameters
 # (Set only one of username/password or access_token)
-artifactory_url: "https://<artifactory_url>/artifactory"
-username: ""
-password: ""
-access_token: ""
 aql_limit: 10000
 
 # Chunk size for splitting deletion tasks

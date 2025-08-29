@@ -125,14 +125,24 @@ def run_aql_pagination(
         with open(temp_aql, "r") as f:
             aql_query = f.read()
         try:
-            response = session.post(
-                f"{artifactory_url}/api/search/aql",
-                data=aql_query,
-                headers=headers,
-                auth=auth,
-            )
-            response.raise_for_status()
-            data = response.json()
+            # Use JFrog CLI to perform the REST API operation
+            curl_cmd = [
+                "jf",
+                "rt",
+                "curl",
+                "/api/search/aql",
+                "-XPOST",
+                "-H",
+                "Content-Type: text/plain",
+                "-d",
+                aql_query,
+            ]
+            result = subprocess.run(curl_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                if logger:
+                    logger.error(f"AQL query failed: {result.stderr}")
+                break
+            data = json.loads(result.stdout)
         except Exception as e:
             if logger:
                 logger.error(f"AQL query failed: {e}")
@@ -459,25 +469,12 @@ def main():
     # If --json is provided, use it. If not, and --repo_name is provided, fetch files from repo using AQL pagination logic
     repo_file_path = args.repo_file
     if not repo_file_path and args.repo_name:
-        artifactory_url = config.get("artifactory_url")
-        username = config.get("username")
-        password = config.get("password")
-        access_token = config.get("access_token")
         limit = config.get("aql_limit", 10000)
         # Write aql query to a temp file (without .include/.offset/.limit)
         base_aql = f'items.find({{"repo": "{args.repo_name}"}})'
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".aql") as tf:
             tf.write(base_aql)
             aql_file = tf.name
-        if not artifactory_url or (not (username and password) and not access_token):
-            logger.error(
-                "Artifactory URL and credentials (username/password or access_token) must be set in config YAML."
-            )
-            exit(1)
-        if access_token:
-            auth = ("", access_token)
-        else:
-            auth = (username, password)
         repo_file_path = f"repo_files_{args.repo_name}.json"
         logger.info("=" * 80)
         logger.info(
@@ -486,8 +483,8 @@ def main():
         run_aql_pagination(
             input_aql=aql_file,
             limit=limit,
-            artifactory_url=artifactory_url,
-            auth=auth,
+            artifactory_url=None,  # Not used anymore
+            auth=None,  # Not used anymore
             logger=logger,
             output_file=repo_file_path,
         )
