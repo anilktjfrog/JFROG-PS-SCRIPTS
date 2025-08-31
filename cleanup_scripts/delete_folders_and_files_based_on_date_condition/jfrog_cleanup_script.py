@@ -51,38 +51,9 @@ def load_repo_files(repo_file):
         return data
 
 
-def is_protected(folder, protected_paths):
-    """
-    Check if a folder path is protected (should not be deleted).
-    Args:
-        folder (str): Folder path to check.
-        protected_paths (list): List of protected path prefixes.
-    Returns:
-        bool: True if folder is protected, False otherwise.
-    """
-    return any(folder.startswith(path) for path in protected_paths)
-
-
-def match_build_folder_with_patterns(folder, patterns):
-    """
-    Determine if a folder matches any of the provided regex patterns.
-    Args:
-        folder (str): Folder path to check.
-        patterns (list): List of regex patterns as strings.
-    Returns:
-        bool: True if folder matches any pattern, False otherwise.
-    """
-    for pat in patterns:
-        if re.search(pat, folder):
-            return True
-    return False
-
-
 def run_aql_pagination(
     input_aql,
     limit,
-    artifactory_url,
-    auth=None,
     logger=None,
     output_file="aqloutput.json",
 ):
@@ -97,8 +68,6 @@ def run_aql_pagination(
     output_file: output file to write aggregated results
     """
 
-    session = requests.Session()
-    headers = {"Content-Type": "text/plain"}
     start_pos = 0
     total_results = 0
     query_count = 0
@@ -119,6 +88,7 @@ def run_aql_pagination(
         with open(temp_aql, "w") as f:
             f.write(base_aql.strip() + f".offset({start_pos}).limit({limit})\n")
         if logger:
+            logger.info("-" * 80)
             logger.info(f"Query #{query_count}: start_pos={start_pos}, limit={limit}")
             logger.info(f"AQL: {open(temp_aql).read()}")
         # Run the AQL query
@@ -149,6 +119,8 @@ def run_aql_pagination(
             break
         results = data.get("results", [])
         range_info = data.get("range", {})
+        if logger:
+            logger.info(f"AQL range_info: {range_info}")
         if not results:
             if logger:
                 logger.info("No results returned, stopping.")
@@ -164,16 +136,19 @@ def run_aql_pagination(
         current_end = range_info.get("end_pos", 0)
         current_total = range_info.get("total", 0)
         current_limit = range_info.get("limit", 0)
+
         if logger:
             logger.info(f"Results: {current_start} to {current_end} of {current_total}")
             logger.info(f"Batch size: {batch_count} items")
         # Check if we've reached the end
-        if (current_end + 1) >= current_total:
+        if current_limit != current_total:
             if logger:
+                logger.info("*" * 80)
                 logger.info("Reached end of results.")
+                logger.info("*" * 80)
             break
         # Update start position for next iteration
-        start_pos = current_end + 1
+        start_pos = current_end + current_start
         time.sleep(1)
     # Combine all results into final output file
     with open(output_file, "w") as out:
@@ -184,6 +159,7 @@ def run_aql_pagination(
                 all_items.extend(items)
         json.dump({"results": all_items}, out, indent=2)
     if logger:
+        logger.info(f"Total file count in repo : {len(all_items)}")
         logger.info(f"Results saved to {output_file}")
         logger.info(f"File size: {os.path.getsize(output_file)/1024/1024:.2f} MB")
         logger.info("=" * 80)
@@ -340,19 +316,38 @@ def delete_folders_with_spec(logger, file_spec_filename, dry_run=False):
         logger.info(f"Error running JFrog CLI: {e}")
 
 
-def get_build_folder(path):
+def get_build_folder(path=None, patterns=None, protected_paths=None, logger=None):
     """
-    Extract the build folder from a given path using a regex pattern.
+    Extract the build folder as the third element in the path, only if it starts with 'build_' and matches a pattern and is not protected.
     Args:
         path (str): File path.
+        patterns (list): List of regex patterns as strings.
+        protected_paths (list): List of protected path prefixes.
     Returns:
-        str: The build folder path, or the original path if not matched.
+        str: The build folder path up to the third element, or None if not matched or protected.
     """
-    match = re.search(r"(.*?/)?(build_.*$)", path)
-    if match:
-        return path[: path.find(match.group(2)) + len(match.group(2))]
-    else:
-        return None
+    parts = path.strip("/").split("/")
+    if len(parts) >= 3 and parts[2].startswith("build_"):
+        build_folder = "/".join(parts[:3])
+        # Check pattern match
+        if patterns:
+            matched = False
+            for pat in patterns:
+                if re.search(pat, build_folder):
+                    matched = True
+                    break
+            if not matched:
+                return None
+        # Check protection
+        if protected_paths:
+            # Add trailing slash for consistency with protected_paths
+            folder_with_slash = build_folder + "/"
+            for path in protected_paths:
+                if folder_with_slash.startswith(path):
+                    logger.info(f"Skipping protected path: {build_folder}")
+                    return None
+        return build_folder
+    return None
 
 
 def print_table(logger, title, rows):
@@ -404,7 +399,7 @@ def print_table(logger, title, rows):
         if show_reason:
             row.append(r["reason"])
         table.append(row)
-    logger.info("\n" + tabulate(table, headers=headers, tablefmt="heavy_grid"))
+    logger.debug("\n" + tabulate(table, headers=headers, tablefmt="heavy_grid"))
 
 
 def main():
@@ -483,8 +478,6 @@ def main():
         run_aql_pagination(
             input_aql=aql_file,
             limit=limit,
-            artifactory_url=None,  # Not used anymore
-            auth=None,  # Not used anymore
             logger=logger,
             output_file=repo_file_path,
         )
@@ -510,13 +503,18 @@ def main():
         )
     logger.info("\n" + "=" * 120 + "\n")
 
-    # Group files by any folder path that ends with the build folder name, including all subfolders, regardless of depth
+    # Group files by build folder (third element in the path, matching pattern)
     folders = defaultdict(list)
-
+    build_folder_patterns = config.get("build_folder_patterns", [])
     for entry in repo_files["results"]:
         if entry.get("type") != "file":
             continue
-        build_folder = get_build_folder(entry["path"])
+        build_folder = get_build_folder(
+            path=entry["path"],
+            patterns=build_folder_patterns,
+            protected_paths=protected_paths,
+            logger=logger,
+        )
         if not build_folder:
             continue
         entry["full_file_name"] = os.path.join(entry["path"], entry["name"])
@@ -525,16 +523,11 @@ def main():
     to_delete = []
     not_selected = []
     logger.info("-" * 120)
-    logger.info(f"Deleting folders which match the build folder pattern...")
+    logger.info(f"Folders which match the build folder pattern...")
     logger.info("-" * 120)
     logger.info(f"Total build folders found: {len(folders)}")
     logger.info(f"Processing build folders for deletion criteria...")
-    build_folder_patterns = config.get("build_folder_patterns", [])
     for folder, files in folders.items():
-        if is_protected(folder + "/", protected_paths):
-            continue
-        if not match_build_folder_with_patterns(folder, build_folder_patterns):
-            continue
         # Get the repo name from the first file in the folder
         repo_name = files[0].get("repo", "")
         folder = os.path.join(repo_name, folder)
